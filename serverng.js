@@ -57,7 +57,7 @@ class EnvioProcessor {
 	  data.estado = ml_estado;
 	  data.subestado = ml_subestado;
 	  
-	  console.log("actualizaFechasRedis", data);
+	  //console.log("actualizaFechasRedis", data);
 	  
 	  if (!redisClient.isOpen) await redisClient.connect();
 	  await redisClient.hDel("estadoFechasML", this.clave);
@@ -66,7 +66,7 @@ class EnvioProcessor {
   
   //elimino claves si es entregado o cancelado
   async eliminarCLavesEntregadosYCancelados(){
-	  console.log("PROCSO DE VACIAR REDIS PARA ENTREGADOS");
+	//  console.log("PROCSO DE VACIAR REDIS PARA ENTREGADOS");
 	  if (!redisClient.isOpen) await redisClient.connect();
 	  await redisClient.hDel("estadoFechasML", this.clave);
 	  await redisClient.hDel("estadosEnviosML", this.clave);
@@ -139,7 +139,7 @@ class EnvioProcessor {
 		  persistent: true, // Asegurar que el mensaje persista
 		});
 
-		console.log(`Mensaje enviado al canal/cola srvshipmltosrvstates: ${message}`);
+		//console.log(`Mensaje enviado al canal/cola srvshipmltosrvstates: ${message}`);
 
 		// Cerrar conexión después de enviar el mensaje
 		setTimeout(() => {
@@ -154,7 +154,7 @@ class EnvioProcessor {
   
   //actualizo ficha envio
   async actualizoDataRedis(){
-	  console.log("actualizoDataRedis fecha sincronizacion");
+	//  console.log("actualizoDataRedis fecha sincronizacion");
 	  const fechaact = await getCurrentDateInArgentina();
 	  this.dataRedisEnvio.fechaActualizacion = fechaact;
 	  if (!redisClient.isOpen) await redisClient.connect();
@@ -228,7 +228,7 @@ class EnvioProcessor {
 	  message: "Envío procesado correctamente",
 	};
   
-	console.log("Resultado del procesamiento:", result);
+	//console.log("Resultado del procesamiento:", result);
 	return result;
   }
 }
@@ -255,7 +255,7 @@ redisClient.on('error', (err) => {
 async function main() {
   try {
     await redisClient.connect();
-    console.log('Conexión exitosa a Redis.');
+  //  console.log('Conexión exitosa a Redis.');
 
     // Obtener los datos iniciales de Redis
     await getTokenRedis();
@@ -342,9 +342,9 @@ async function getTokenRedis() {
   try {
     const data = await redisClient.get('token');
     Atokens = JSON.parse(data || '{}');
-    console.log('Datos de Redis:', Atokens);
+   // console.log('Datos de Redis:', Atokens);
   } catch (error) {
-    console.error('Error al obtener tokens de Redis:', error);
+   // console.error('Error al obtener tokens de Redis:', error);
   }
 }
 
@@ -356,14 +356,14 @@ async function getTokenForSeller(seller_id) {
         const token = await redisClient.hGet('token', seller_id);
 
         if (token) {
-            console.log(`Token encontrado para seller_id ${seller_id}: ${token}`);
+         //   console.log(`Token encontrado para seller_id ${seller_id}: ${token}`);
             return token;
         } else {
-            console.log(`No se encontró token para seller_id ${seller_id}`);
+      //      console.log(`No se encontró token para seller_id ${seller_id}`);
             return null;
         }
     } catch (error) {
-        console.error('Error al obtener el token de Redis:', error);
+      //  console.error('Error al obtener el token de Redis:', error);
         return null;
     }
 }
@@ -396,7 +396,11 @@ async function consumirMensajes() {
 		channel = await connection.createChannel();
 		await channel.assertQueue('estadoEnvioML_from_callback', { durable: false });
   
-		console.log('Conexión a RabbitMQ establecida.');
+		//console.log('Conexión a RabbitMQ establecida.');
+
+		await channel.prefetch(25); 
+
+
   
 		channel.consume('estadoEnvioML_from_callback', async (mensaje) => {
 		  if (mensaje) {
@@ -408,7 +412,7 @@ async function consumirMensajes() {
 			if (!redisClient.isOpen) await redisClient.connect();
 			const exists = await redisClient.hExists(claveEstadoRedis, claveabuscar);
   
-			console.log('Nuevo envío recibido:', data);
+			//console.log('Nuevo envío recibido:', data);
   
 			if (exists) {
 			  let envioData = await redisClient.hGet(claveEstadoRedis, claveabuscar);
@@ -416,20 +420,20 @@ async function consumirMensajes() {
 			  const token = await getTokenForSeller(sellerid);
   
 			  if (!token) {
-				console.error(`No se encontró token para seller_id ${sellerid}.`);
+			//	console.error(`No se encontró token para seller_id ${sellerid}.`);
 				return;
 			  }
   
 			  const envioML = await obtenerDatosEnvioML(shipmentid, token);
   
 			  if (!envioML) {
-				console.error(`No se pudieron obtener datos para el envío ${shipmentid}.`);
+			//	console.error(`No se pudieron obtener datos para el envío ${shipmentid}.`);
 				return;
 			  }
   
 			  let envioRedisFecha = await redisClient.hGet(claveEstadoFechasML, claveabuscar);
 			  if (!envioRedisFecha) {
-				console.log(`No se encontró dataRedisFecha para la clave ${claveabuscar}. Creando uno nuevo...`);
+			//	console.log(`No se encontró dataRedisFecha para la clave ${claveabuscar}. Creando uno nuevo...`);
 				envioRedisFecha = JSON.stringify({
 				  fecha: envioML.status_history,
 				  clave: `${envioML.status}-${envioML.substatus}`,
@@ -447,12 +451,13 @@ async function consumirMensajes() {
 			  envio.setDataRedisEnvio(envioData);
 			  envio.setDataRedisFecha(envioRedisFecha);
 			  const resultado = await envio.procesar();
-			  console.log("Resultado final:", resultado);
+			  //console.log("Resultado final:", resultado);
 			} else {
-			  console.log(`Clave ${claveabuscar} no encontrada en Adata.`);
+			  //console.log(`Clave ${claveabuscar} no encontrada en Adata.`);
 			}
+			channel.ack(mensaje);
 		  }
-		}, { noAck: true });
+		}, { noAck: false });
   
 		// Manejo de errores en el canal
 		channel.on('error', (err) => {
@@ -548,3 +553,4 @@ async function simular(){
 
 // Llamar a la función principal
 main();
+
