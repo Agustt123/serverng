@@ -164,7 +164,7 @@ class EnvioProcessor {
 
   // Método procesar
   async procesar() {
-	console.log("procesar");
+	//console.log("procesar");
   
 	// Verificar si los datos necesarios están presentes
 	if (!this.token || !this.dataEnvioML || !this.dataRedisEnvio) {
