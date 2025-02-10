@@ -17,7 +17,7 @@ const vaciarCola = async () => {
     // Consumir mensajes de la cola
     channel.consume(QUEUE_NAME, (msg) => {
       if (msg !== null) {
-        console.log(`Mensaje recibido: ${msg.content.toString()}`);
+      //  console.log(`Mensaje recibido: ${msg.content.toString()}`);
         // Aquí puedes procesar el mensaje si es necesario
 
         // Acknowledge el mensaje para eliminarlo de la cola
