@@ -398,7 +398,7 @@ async function consumirMensajes() {
   
 		//console.log('Conexión a RabbitMQ establecida.');
 
-		await channel.prefetch(25); 
+		await channel.prefetch(1000); 
 
 
   
