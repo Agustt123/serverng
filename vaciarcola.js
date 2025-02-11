@@ -3,14 +3,27 @@ const amqp = require('amqplib');
 const QUEUE_NAME = 'envioML_from_callback'; // Cambia esto por el nombre de tu cola
 const RABBITMQ_URL = 'amqp://lightdata:QQyfVBKRbw6fBb@158.69.131.226:5672'; // Cambia esto por la URL de tu RabbitMQ
 
+let reconnectAttempts = 0;
+const maxReconnectAttempts = 10; // Número máximo de intentos de reconexión
+
 const vaciarCola = async () => {
   let connection;
   let channel;
 
   const reconnect = async () => {
     try {
-      // Intentar conectarse a RabbitMQ
-      connection = await amqp.connect(RABBITMQ_URL);
+      if (reconnectAttempts >= maxReconnectAttempts) {
+        console.error('Número máximo de intentos de reconexión alcanzado');
+        return;
+      }
+
+      // Incrementar el contador de intentos de reconexión
+      reconnectAttempts++;
+
+      console.log(`Intentando reconectar... (Intento ${reconnectAttempts})`);
+
+      // Intentar conectarse a RabbitMQ con un heartbeat de 60 segundos
+      connection = await amqp.connect(RABBITMQ_URL + '?heartbeat=60');
       channel = await connection.createChannel();
 
       // Asegurarse de que la cola existe
