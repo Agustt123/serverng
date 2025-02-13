@@ -2,6 +2,7 @@ const amqp = require('amqplib');
 const redis = require('redis');
 const axios = require('axios'); // Para manejar solicitudes HTTP
 
+const pm2 = require('pm2'); // Importar PM2
 class EnvioProcessor {
   constructor() {
     this.token = null;
@@ -43,6 +44,7 @@ class EnvioProcessor {
     }
   }
 
+  
   async actualizaFechasRedis(ml_clave, ml_fechas, ml_estado, ml_subestado) {
     let data = this.dataRedisFecha;
     data.fecha = ml_fechas;
@@ -189,7 +191,26 @@ class EnvioProcessor {
     };
   }
 }
+async function reiniciarScript() {
+  return new Promise((resolve, reject) => {
+    pm2.connect((err) => {
+      if (err) {
+        console.error('Error al conectar a PM2:', err);
+        return reject(err);
+      }
 
+      pm2.restart('serverng.js', (err) => {
+        pm2.disconnect(); // Desconectar de PM2
+        if (err) {
+          console.error('Error al reiniciar el script:', err);
+          return reject(err);
+        }
+        console.log('Script reiniciado correctamente.');
+        resolve();
+      });
+    });
+  });
+}
 let Atokens = [];
 const claveEstadoRedis = 'estadosEnviosML';
 const claveEstadoFechasML = 'estadoFechasML';
@@ -212,6 +233,7 @@ async function main() {
     await getTokenRedis();
     await consumirMensajes();
   } catch (error) {
+    await reiniciarScript();
     console.error('Error en la ejecución principal:', error);
   } finally {
     await redisClient.disconnect();
@@ -481,4 +503,5 @@ async function simular() {
 
 // Llamar a la función principal
 main();
+
 
