@@ -388,7 +388,9 @@ async function consumirMensajes() {
 			  envio.setDataRedisFecha(envioRedisFecha);
 			  const resultado = await envio.procesar();
 			}
-			channel.ack(mensaje);
+			if (channel && channel.connection) {
+            channel.ack(mensaje);
+        }
 		  }
 		}, { noAck: false });
   
