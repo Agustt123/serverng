@@ -1,6 +1,8 @@
+
 const amqp = require('amqplib');
 const redis = require('redis');
 const axios = require('axios'); // Para manejar solicitudes HTTP
+const { exec } = require('child_process');
 
 const pm2 = require('pm2'); // Importar PM2
 class EnvioProcessor {
@@ -315,143 +317,130 @@ function extractKey(resource) {
   return match ? match[1] : null;
 }
 
+
+
+
 async function consumirMensajes() {
-	let connection;
-	let channel;
-	let retryCount = 0;
-	const maxRetries = 5; // Establece un límite de intentos
-  
-	const reconnect = async () => {
-	  try {
-		// Verifica si la conexión y el canal están abiertos antes de cerrarlos
-		if (connection && connection.isOpen) await connection.close();
-		if (channel && channel.isOpen) await channel.close();
-  
-		// Conectar a RabbitMQ
-		connection = await amqp.connect({
-		  protocol: 'amqp',
-		  hostname: '158.69.131.226',
-		  port: 5672,
-		  username: 'lightdata',
-		  password: 'QQyfVBKRbw6fBb',
-		  heartbeat: 30,
-		});
-  
-		// Crear un nuevo canal
-		channel = await connection.createChannel();
-		await channel.assertQueue('shipments_states_callback_ml', { durable: true });
-		//await channel.prefetch(1);
-  
-		// Consumir mensajes
-		channel.consume('shipments_states_callback_ml', async (mensaje) => {
-		
-			
-		  if (mensaje) {
-			const data = JSON.parse(mensaje.content.toString());
-			//console.log(data);
-			
-			const shipmentid = extractKey(data['resource']);
-			const sellerid = data['sellerid'];
-			const claveabuscar = `${sellerid}-${shipmentid}`;
-  
-			if (!redisClient.isOpen) await redisClient.connect();
-			const exists = await redisClient.hExists(claveEstadoRedis, claveabuscar);
-  
-			if (exists) {
-			  let envioData = await redisClient.hGet(claveEstadoRedis, claveabuscar);
-			  envioData = JSON.parse(envioData);
-			  const token = await getTokenForSeller(sellerid);
-  
-			  if (!token) return;
-  
-			  const envioML = await obtenerDatosEnvioML(shipmentid, token);
-  
-			  if (!envioML) return;
-  
-			  let envioRedisFecha = await redisClient.hGet(claveEstadoFechasML, claveabuscar);
-			  if (!envioRedisFecha) {
-				envioRedisFecha = JSON.stringify({
-				  fecha: envioML.status_history,
-				  clave: `${envioML.status}-${envioML.substatus}`,
-				  estado: envioML.status,
-				  subestado: envioML.substatus,
-				});
-			  }
-  
-			  const envio = new EnvioProcessor();
-			  envio.setToken(token);
-			  envio.setSellerid(sellerid);
-			  envio.setShipmentid(shipmentid);
-			  envio.setClave(claveabuscar);
-			  envio.setDataEnvioML(envioML);
-			  envio.setDataRedisEnvio(envioData);
-			  envio.setDataRedisFecha(envioRedisFecha);
-			  const resultado = await envio.procesar();
-			}
-			if (channel && channel.connection) {
-            channel.ack(mensaje);
+    let connection;
+    let channel;
+    let retryCount = 0;
+    const maxRetries = 2; // Límite de intentos
+    const scriptName = 'serverng.js'; // Cambia esto por el nombre de tu script
+
+    const reconnect = async () => {
+        try {
+            // Verifica si la conexión y el canal están abiertos antes de cerrarlos
+            if (connection && connection.isOpen) await connection.close();
+            if (channel && channel.isOpen) await channel.close();
+
+            // Conectar a RabbitMQ
+            connection = await amqp.connect({
+                protocol: 'amqp',
+                hostname: '158.69.131.226',
+                port: 5672,
+                username: 'lightdata',
+                password: 'QQyfVBKRbw6fBb',
+                heartbeat: 30,
+            });
+
+            // Crear un nuevo canal
+            channel = await connection.createChannel();
+            await channel.assertQueue('shipments_states_callback_ml', { durable: true });
+
+            // Consumir mensajes
+            channel.consume('shipments_states_callback_ml', async (mensaje) => {
+                if (mensaje) {
+                    const data = JSON.parse(mensaje.content.toString());
+                    const shipmentid = extractKey(data['resource']);
+                    const sellerid = data['sellerid'];
+                    const claveabuscar = `${sellerid}-${shipmentid}`;
+
+                    if (!redisClient.isOpen) await redisClient.connect();
+                    const exists = await redisClient.hExists(claveEstadoRedis, claveabuscar);
+
+                    if (exists) {
+                        let envioData = await redisClient.hGet(claveEstadoRedis, claveabuscar);
+                        envioData = JSON.parse(envioData);
+                        const token = await getTokenForSeller(sellerid);
+
+                        if (!token) return;
+
+                        const envioML = await obtenerDatosEnvioML(shipmentid, token);
+
+                        if (!envioML) return;
+
+                        let envioRedisFecha = await redisClient.hGet(claveEstadoFechasML, claveabuscar);
+                        if (!envioRedisFecha) {
+                            envioRedisFecha = JSON.stringify({
+                                fecha: envioML.status_history,
+                                clave: `${envioML.status}-${envioML.substatus}`,
+                                estado: envioML.status,
+                                subestado: envioML.substatus,
+                            });
+                        }
+
+                        const envio = new EnvioProcessor();
+                        envio.setToken(token);
+                        envio.setSellerid(sellerid);
+                        envio.setShipmentid(shipmentid);
+                        envio.setClave(claveabuscar);
+                        envio.setDataEnvioML(envioML);
+                        envio.setDataRedisEnvio(envioData);
+                        envio.setDataRedisFecha(envioRedisFecha);
+                        const resultado = await envio.procesar();
+                    }
+                    channel.ack(mensaje);
+                }
+            }, { noAck: false });
+
+            // Manejo de errores en el canal
+            channel.on('error', handleError);
+            channel.on('close', handleClose);
+
+            // Manejo de errores en la conexión
+            connection.on('error', handleError);
+            connection.on('close', handleClose);
+
+            retryCount = 0; // Reiniciar el contador de reintentos cuando la reconexión tiene éxito
+        } catch (err) {
+            console.error('Error al conectar a RabbitMQ:', err);
+            handleReconnect();
         }
-		  }
-		}, { noAck: false });
-  
-		// Manejo de errores en el canal
-		channel.on('error', (err) => {
-		  console.error('Error en el canal:', err);
-		  if (retryCount < maxRetries) {
-			retryCount++;
-			setTimeout(reconnect, 5000);
-		  } else {
-			console.error('Se alcanzó el límite de reintentos del canal.');
-		  }
-		});
-  
-		// Manejo de cierre del canal
-		channel.on('close', () => {
-		  console.error('Canal cerrado. Intentando reconectar...');
-		  if (retryCount < maxRetries) {
-			retryCount++;
-			setTimeout(reconnect, 5000);
-		  } else {
-			console.error('Se alcanzó el límite de reintentos del canal.');
-		  }
-		});
-  
-		// Manejo de errores en la conexión
-		connection.on('error', (err) => {
-		  console.error('Error en la conexión:', err);
-		  if (retryCount < maxRetries) {
-			retryCount++;
-			setTimeout(reconnect, 5000);
-		  } else {
-			console.error('Se alcanzó el límite de reintentos de conexión.');
-		  }
-		});
-  
-		// Manejo de cierre de la conexión
-		connection.on('close', () => {
-		  console.error('Conexión cerrada. Intentando reconectar...');
-		  if (retryCount < maxRetries) {
-			retryCount++;
-			setTimeout(reconnect, 5000);
-		  } else {
-			console.error('Se alcanzó el límite de reintentos de conexión.');
-		  }
-		});
-  
-		retryCount = 0; // Resetear el contador de reintentos cuando la reconexión tiene éxito
-	  } catch (err) {
-		console.error('Error al conectar a RabbitMQ:', err);
-		if (retryCount < maxRetries) {
-		  retryCount++;
-		  setTimeout(reconnect, 5000); // Reintentar después de 5 segundos
-		} else {
-		  console.error('Se alcanzó el límite de reintentos de conexión.');
-		}
-	  }
-	};
-  
-	await reconnect();
-  }
+    };
+
+    const handleError = (err) => {
+        console.error('Error:', err);
+        handleReconnect();
+    };
+
+    const handleClose = () => {
+        console.error('Conexión cerrada. Intentando reconectar...');
+        handleReconnect();
+    };
+
+    const handleReconnect = () => {
+        if (retryCount < maxRetries) {
+            retryCount++;
+            setTimeout(reconnect, 5000); // Reintentar después de 5 segundos
+        } else {
+            console.error('Se alcanzó el límite de reintentos de conexión. Reiniciando el script con PM2...');
+            exec(`pm2 restart ${scriptName}`, (error, stdout, stderr) => {
+                if (error) {
+                    console.error(`Error al reiniciar el script: ${error.message}`);
+                    return;
+                }
+                if (stderr) {
+                    console.error(`Error en stderr: ${stderr}`);
+                    return;
+                }
+                console.log(`Script reiniciado: ${stdout}`);
+            });
+        }
+    };
+
+    await reconnect();
+}
+
   
 
 async function simular() {
@@ -505,5 +494,3 @@ async function simular() {
 
 // Llamar a la función principal
 main();
-
-
