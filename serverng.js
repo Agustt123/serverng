@@ -3,10 +3,196 @@ const amqp = require('amqplib');
 const redis = require('redis');
 const axios = require('axios'); // Para manejar solicitudes HTTP
 const { exec } = require('child_process');
-const fs = require('fs');
 
 const pm2 = require('pm2'); // Importar PM2
+class EnvioProcessor {
+  constructor() {
+    this.token = null;
+    this.dataEnvioML = null;
+    this.dataRedisEnvio = null;
+    this.dataRedisFecha = null;
+    this.sellerid = null;
+    this.shipmentid = null;
+    this.clave = null;
+  }
 
+  setClave(claveabuscar) {
+    this.clave = claveabuscar;
+  }
+
+  setSellerid(sellerid) {
+    this.sellerid = sellerid;
+  }
+
+  setShipmentid(shipmentid) {
+    this.shipmentid = shipmentid;
+  }
+
+  setToken(token) {
+    this.token = token;
+  }
+
+  setDataEnvioML(dataEnvioML) {
+    this.dataEnvioML = dataEnvioML;
+  }
+
+  setDataRedisEnvio(dataRedisEnvio) {
+    this.dataRedisEnvio = dataRedisEnvio;
+  }
+
+  setDataRedisFecha(dataRedisFecha) {
+    if (dataRedisFecha != "") {
+      this.dataRedisFecha = JSON.parse(dataRedisFecha);
+    }
+  }
+
+  
+  async actualizaFechasRedis(ml_clave, ml_fechas, ml_estado, ml_subestado) {
+    let data = this.dataRedisFecha;
+    data.fecha = ml_fechas;
+    data.clave = ml_estado + "-" + ml_subestado;
+    data.estado = ml_estado;
+    data.subestado = ml_subestado;
+
+    if (!redisClient.isOpen) await redisClient.connect();
+    await redisClient.hDel("estadoFechasML", this.clave);
+    await redisClient.hSet("estadoFechasML", this.clave, JSON.stringify(data));
+  }
+
+  async eliminarCLavesEntregadosYCancelados() {
+    if (!redisClient.isOpen) await redisClient.connect();
+    await redisClient.hDel("estadoFechasML", this.clave);
+    await redisClient.hDel("estadosEnviosML", this.clave);
+  }
+
+  async obtenerFechaFinalyestado() {
+    const ml_fechas = this.dataEnvioML.status_history;
+    const ml_estado = this.dataEnvioML.status;
+    const ml_subestado = this.dataEnvioML.substatus;
+
+    let estadonumero = -1;
+    let fecha = null;
+
+    if (ml_estado === "delivered") {
+      estadonumero = 5;
+      fecha = ml_fechas.date_delivered;
+    } else if (ml_estado === "cancelled") {
+      estadonumero = 8;
+      fecha = ml_fechas.date_cancelled;
+    } else if (ml_estado === "shipped") {
+      estadonumero = 2;
+      fecha = ml_fechas.date_shipped;
+
+      if (ml_subestado === "delivery_failed" || ml_subestado === "receiver_absent") {
+        estadonumero = 6;
+        fecha = ml_fechas.date_first_visit;
+      } else if (ml_subestado === "claimed_me") {
+        estadonumero = 8;
+        fecha = ml_fechas.date_first_visit;
+      } else if (ml_subestado === "buyer_rescheduled") {
+        estadonumero = 12;
+        fecha = ml_fechas.date_first_visit;
+      }
+    } else if (ml_estado === "not_delivered") {
+      estadonumero = 8;
+      fecha = ml_fechas.date_returned;
+    }
+
+    return { estado: estadonumero, fecha: fecha };
+  }
+
+  async sendToServerEstado(dateE) {
+    try {
+      // Establecer conexión con RabbitMQ
+      if (!this.channel) {
+        this.connection = await amqp.connect({
+          protocol: 'amqp',
+          hostname: '158.69.131.226',
+          port: 5672,
+          username: 'lightdata',
+          password: 'QQyfVBKRbw6fBb',
+          heartbeat: 30,
+        });
+        this.channel = await this.connection.createChannel();
+        await this.channel.assertQueue("srvshipmltosrvstates", {
+          durable: true,
+        });
+      }
+
+      const message = typeof dateE === 'string' ? dateE : JSON.stringify(dateE);
+      this.channel.sendToQueue("srvshipmltosrvstates", Buffer.from(message), {
+        persistent: true,
+      });
+
+      setTimeout(() => {
+        this.channel.close();
+        this.connection.close();
+      }, 500);
+    } catch (error) {
+      console.error('Error al enviar el mensaje:', error);
+    }
+  }
+
+  async actualizoDataRedis() {
+    const fechaact = await getCurrentDateInArgentina();
+    this.dataRedisEnvio.fechaActualizacion = fechaact;
+    if (!redisClient.isOpen) await redisClient.connect();
+    await redisClient.hDel("estadosEnviosML", this.clave);
+    await redisClient.hSet("estadosEnviosML", this.clave, JSON.stringify(this.dataRedisEnvio));
+  }
+
+  async procesar() {
+    if (!this.token || !this.dataEnvioML || !this.dataRedisEnvio) {
+      console.error("Faltan datos para procesar el envío.");
+      return { status: "error", message: "Faltan datos para procesar el envío." };
+    }
+
+    if (!this.dataRedisFecha) {
+      const ml_fechas = this.dataEnvioML.status_history;
+      const ml_estado = this.dataEnvioML.status;
+      const ml_subestado = this.dataEnvioML.substatus;
+      const ml_clave = `${ml_estado}-${ml_subestado}`;
+
+      this.dataRedisFecha = {
+        fecha: ml_fechas,
+        clave: ml_clave,
+        estado: ml_estado,
+        subestado: ml_subestado,
+      };
+
+      await this.actualizaFechasRedis(ml_clave, ml_fechas, ml_estado, ml_subestado);
+    }
+
+    await this.actualizoDataRedis();
+
+    const response = await this.obtenerFechaFinalyestado();
+    const estadonumero = response.estado;
+    let fecha = response.fecha;
+
+    fecha = await convertToArgentinaTime(fecha);
+
+    const dataE = {
+      didempresa: this.dataRedisEnvio.didEmpresa,
+      didenvio: this.dataRedisEnvio.didEnvio,
+      estado: estadonumero,
+      subestado: this.dataEnvioML.substatus,
+      estadoML: this.dataEnvioML.status,
+      fecha: fecha,
+      quien: 0,
+    };
+
+    await this.sendToServerEstado(dataE);
+
+    if (estadonumero === 5 || estadonumero === 8) {
+      await this.eliminarCLavesEntregadosYCancelados();
+    }
+
+    return {
+      status: "success",
+      message: "Envío procesado correctamente",
+    };
+  }
+}
 async function reiniciarScript() {
   return new Promise((resolve, reject) => {
     pm2.connect((err) => {
@@ -27,9 +213,9 @@ async function reiniciarScript() {
     });
   });
 }
-
 let Atokens = [];
-let Ausados = [];
+const claveEstadoRedis = 'estadosEnviosML';
+const claveEstadoFechasML = 'estadoFechasML';
 
 const redisClient = redis.createClient({
   socket: {
@@ -56,6 +242,30 @@ async function main() {
   }
 }
 
+async function getCurrentDateInArgentina() {
+  const now = new Date();
+  const argentinaOffset = -3 * 60 * 60 * 1000;
+  const argentinaTime = new Date(now.getTime() + argentinaOffset);
+
+  const year = argentinaTime.getFullYear();
+  const month = String(argentinaTime.getMonth() + 1).padStart(2, '0');
+  const day = String(argentinaTime.getDate()).padStart(2, '0');
+  const hours = String(argentinaTime.getHours()).padStart(2, '0');
+  const minutes = String(argentinaTime.getMinutes()).padStart(2, '0');
+  const seconds = String(argentinaTime.getSeconds()).padStart(2, '0');
+
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
+async function convertToArgentinaTime(dateString) {
+  const date = new Date(dateString);
+  const utcTime = date.getTime();
+  const argentinaOffset = -3 * 60 * 60 * 1000;
+  const argentinaTime = new Date(utcTime + argentinaOffset);
+  const formattedDate = argentinaTime.toISOString().slice(0, 19).replace('T', ' ');
+  return formattedDate;
+}
+
 async function obtenerDatosEnvioML(shipmentid, token) {
   try {
     const url = `https://api.mercadolibre.com/shipments/${shipmentid}`;
@@ -77,40 +287,10 @@ async function obtenerDatosEnvioML(shipmentid, token) {
   }
 }
 
-async function obtenerDatosOrderML(shipmentid, token) {
-  try {
-    const url = `https://api.mercadolibre.com/orders/${shipmentid}`;
-    console.log(url);
-    console.log(token);
-    const response = await axios.get(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (response.data && response.data.id) {
-      return response.data;
-    } else {
-      console.error(`No se encontraron datos válidos para el envío ${shipmentid}.`);
-      return null;
-    }
-  } catch (error) {
-    console.error(`Error al obtener datos del envío ${shipmentid} desde Mercado Libre:`, error.message);
-    return null;
-  }
-}
-
 async function getTokenRedis() {
   try {
-    const type = await redisClient.type('token');
-    if (type !== 'hash') {
-      //console.error(La clave 'token' no es un hash, es de tipo: ${type});
-      return; // O maneja el error según sea necesario
-    }
-
-    const data = await redisClient.hGetAll('token');
-    console.log(data);
-    Atokens = data; // Asegúrate de que esto sea lo que necesitas
+    const data = await redisClient.get('token');
+    Atokens = JSON.parse(data || '{}');
   } catch (error) {
     console.error('Error al obtener tokens de Redis:', error);
   }
@@ -118,179 +298,27 @@ async function getTokenRedis() {
 
 async function getTokenForSeller(seller_id) {
   try {
-   token = Atokens[seller_id];
+    if (!redisClient.isOpen) await redisClient.connect();
+    const token = await redisClient.hGet('token', seller_id);
 
     if (token) {
       return token;
     } else {
-      return -1;
+      return null;
     }
   } catch (error) {
     console.error('Error al obtener el token de Redis:', error);
-    return -1;
+    return null;
   }
 }
 
 function extractKey(resource) {
-  const match = resource.match(/\/orders\/(\d+)/);
+  const match = resource.match(/\/shipments\/(\d+)/);
   return match ? match[1] : null;
 }
 
-async function obtenerFechaActual() {
-  const ahora = new Date();
-
-  // Formato "YYYY-MM-DD"
-  const fechaFormateada = ahora.toISOString().split('T')[0];
-
-  // Formato Unix timestamp (segundos desde 1970)
-  const timestampUnix = Math.floor(ahora.getTime() / 1000);
-
-  return {
-      fecha: fechaFormateada,
-      unix: timestampUnix
-  };
-}
-
-async function armadojson(income){
-
-  const orderData = income.orderData;
-  const envioML = income.envioML;
-  const sellerid = income.sellerid;
-  const fulfillment = 1; //income.fulfillment;
-
-  shipping_items = envioML.shipping_items;
-  order_items = orderData.order_items;
-
-  tracking_method = envioML.tracking_method;
-  receiver_address = envioML.receiver_address;
-  tags = envioML.tags;
-  turbo = (tags.includes("turbo")) ? 1 : 0;
-  idorder = orderData.id;
-  packid = orderData.pack_id;
-  pesototal = 0;
-
-  pref = "C";
-  if(envioML.delivery_preference == "Residential"){
-    pref = "R";
-  }
-
- console.log("shipment", shipping_items);
- console.log("orderitems",order_items);
-
-  fechactual = await obtenerFechaActual();
-  AenviosItems = [];
-  if(fulfillment == 1){
-
-    
-    for(n in order_items){
- 
-      const linitems = order_items[n];
-
-      //variation_attributes
-      //console.log(linitems.item.variation_attributes);
-
-      dimensions = "";
-      peso = 0;
-      variacion = "";
-
-      if(linitems.item.variation_id != null){
-        variacion = linitems.item.variation_id;
-      }
-
-      for(j in shipping_items){
-         const lineashipment = shipping_items[j];
-
-         if( (linitems.item.id == lineashipment.id) && (linitems.quantity == lineashipment.quantity) ){
-
-            let dimen = lineashipment.dimensions;
-            const [medidasStr, pesoStr] = dimen.split(",");
-
-            dimensions = medidasStr;
-            pesototal += (pesoStr *1);
-
-         }
-
-      }
-
-      a = {
-        "codigo": linitems.item.id,
-        "imagen": "",
-        "descripcion": linitems.item.title,
-        "ml_id": linitems.item.id,
-        "dimensions": dimensions,
-        "cantidad": linitems.quantity,
-        "variacion": variacion,
-        "seller_sku": linitems.item.seller_sku
-      
-      }
-
-      AenviosItems.push(a);
-
-    }
-
-   // process.exit(0);
-  }
 
 
-  let data = {
-      "didDeposito": 1,
-      'fulfillment':fulfillment,
-      "gtoken": "",
-      "flex": 1,
-      "turbo": turbo,
-      "fecha_inicio": fechactual.fecha,
-      "fechaunix": fechactual.unix,
-      "lote": "mlia",
-      "ml_shipment_id": orderData.shipping.id,
-      "ml_vendedor_id": sellerid,
-      "ml_venta_id": idorder,
-      "ml_pack_id": packid,
-      "ml_qr_seguridad": "",
-      "didCliente": income.didCliente,
-      "didCuenta":  income.didCuenta,
-      "didServicio": 1,
-      "peso": pesototal,
-      "volumen": 0,
-      "bultos": 1,
-      "valor_declarado": orderData.paid_amount,
-      "monto_total_a_cobrar": 0,
-      "tracking_method": tracking_method,
-      "tracking_number": orderData.shipping.id,
-      "fecha_venta": orderData.date_created,
-      "destination_receiver_name": receiver_address.receiver_name,
-      "destination_receiver_phone": receiver_address.receiver_phone,
-      "destination_receiver_email": "",
-      "destination_comments": receiver_address.comment,
-      "delivery_preference": pref,
-      "quien": 0,
-      "enviosObservaciones": {
-        "observacion": receiver_address.comment
-      },
-      "enviosDireccionesDestino": {
-        "calle": receiver_address.street_name,
-        "numero": receiver_address.street_number,
-        "address_line": receiver_address.address_line,
-        "cp": receiver_address.zip_code,
-        "localidad": receiver_address.city.name,
-        "provincia": receiver_address.state.name,
-        "pais": receiver_address.country.name,
-        "latitud": receiver_address.latitude,
-        "longitud": receiver_address.longitude,
-        "quien": 0,
-        "destination_comments": receiver_address.comment,
-        "delivery_preference": pref
-      },
-      "enviosItems": AenviosItems
-  }
-
-  console.log(data);
-
-  return data;
-}
-
-async function enviarColaEnviosAlta(datajson){
-
-}
 
 async function consumirMensajes() {
     let connection;
@@ -317,71 +345,30 @@ async function consumirMensajes() {
 
             // Crear un nuevo canal
             channel = await connection.createChannel();
-            await channel.assertQueue('enviosml_ia', { durable: true });
-            await channel.prefetch(20);
+            await channel.assertQueue('shipments_states_callback_ml', { durable: true });
 
             // Consumir mensajes
-            channel.consume('enviosml_ia', async (mensaje) => {
+            channel.consume('shipments_states_callback_ml', async (mensaje) => {
                 if (mensaje) {
                     const data = JSON.parse(mensaje.content.toString());
-                    const orderid = extractKey(data['resource']);
+                    const shipmentid = extractKey(data['resource']);
                     const sellerid = data['sellerid'];
-                    const didCliente = 1; //data['didCliente'];
-                    const didCuenta = 1; //data['didCuenta'];
-                    const didEmpresa = 270; //data['didEmpresa'];
-                    const claveabuscar = `${sellerid}-${orderid}`;
+                    const claveabuscar = `${sellerid}-${shipmentid}`;
 
-                    //console.log(data);
+                    if (!redisClient.isOpen) await redisClient.connect();
+                    const exists = await redisClient.hExists(claveEstadoRedis, claveabuscar);
 
-                    const token = await getTokenForSeller(sellerid);
-                
+                    if (exists) {
+                        let envioData = await redisClient.hGet(claveEstadoRedis, claveabuscar);
+                        envioData = JSON.parse(envioData);
+                        const token = await getTokenForSeller(sellerid);
 
-                    if (token != -1) {  
-                        const orderData = await obtenerDatosOrderML(orderid, token);
-                        if (orderData) {
+                        if (!token) return;
 
-                          //console.log(orderData);
+                        const envioML = await obtenerDatosEnvioML(shipmentid, token);
 
-                          packid = orderData.pack_id;
-                          shipmentid = orderData.shipping.id;
+                        if (!envioML) return;
 
-                          const envioML = await obtenerDatosEnvioML(shipmentid, token);
-                          if (envioML) {
-
-                            //console.log(envioML);
-
-                            if(envioML.logistic_type == 'self_service'){
-
-                              const income = {
-                                "sellerid":sellerid,
-                                "didEmpresa":didEmpresa,
-                                "didCliente":didCliente,
-                                "didCuenta":didCuenta,
-                                "orderData":orderData,
-                                "envioML":envioML
-                              };
-
-                             
-
-                              const claveusada = `${sellerid}-${orderid}-${shipmentid}`;
-                              if (!Ausados.hasOwnProperty(claveusada)) {
-
-                                const dataEnviar = {"operador":"enviosmlia","data": await armadojson(income) };
-
-                                //envio a lacola de altaenvio
-                                await enviarColaEnviosAlta(dataEnviar);
-
-                                Ausados[claveusada] = 1;
-                              }
-
-                            }
-                          }
-
-                          //console.log(Ausados);
-                        }
-                       // process.exit(0);
-
-                        /*
                         let envioRedisFecha = await redisClient.hGet(claveEstadoFechasML, claveabuscar);
                         if (!envioRedisFecha) {
                             envioRedisFecha = JSON.stringify({
@@ -401,9 +388,7 @@ async function consumirMensajes() {
                         envio.setDataRedisEnvio(envioData);
                         envio.setDataRedisFecha(envioRedisFecha);
                         const resultado = await envio.procesar();
-                        */
                     }
-
                     channel.ack(mensaje);
                 }
             }, { noAck: false });
@@ -454,6 +439,57 @@ async function consumirMensajes() {
     };
 
     await reconnect();
+}
+
+  
+
+async function simular() {
+  let data = { "resource": "/shipments/44416729582", "sellerid": "179907718" };
+  const shipmentid = extractKey(data['resource']);
+  const sellerid = data['sellerid'];
+  const claveabuscar = `${sellerid}-${shipmentid}`;
+  if (!redisClient.isOpen) await redisClient.connect();
+  let exists = await redisClient.hExists(claveEstadoRedis, claveabuscar);
+  console.log('Nuevo envío recibido:', data);
+
+  if (exists) {
+    let envioData = await redisClient.hGet(claveEstadoRedis, claveabuscar);
+    envioData = JSON.parse(envioData);
+    const token = await getTokenForSeller(sellerid);
+    const envioML = await obtenerDatosEnvioML(shipmentid, token);
+    let envioRedisFecha = "";
+
+    let exists = await redisClient.hExists(claveEstadoFechasML, claveabuscar);
+    if (exists) {
+      envioRedisFecha = await redisClient.hGet(claveEstadoFechasML, claveabuscar);
+    }
+
+    console.log("envioRedisFecha", envioRedisFecha);
+
+    if (token) {
+      const envio = new EnvioProcessor();
+      envio.setToken(token);
+      envio.setSellerid(sellerid);
+      envio.setShipmentid(shipmentid);
+      envio.setClave(claveabuscar);
+      envio.setDataEnvioML(envioML);
+      envio.setDataRedisEnvio(envioData);
+      envio.setDataRedisFecha(envioRedisFecha);
+      const resultado = await envio.procesar();
+      console.log("Resultado final:", resultado);
+      process.exit(0);
+    }
+
+    if (token) {
+      console.log('Procesando con el token:', token);
+      await updateFechaEstadoML(sellerid, shipmentid, envioML, envioData);
+      process.exit(0);
+    } else {
+      console.log(`No se encontró token para seller_id ${sellerid}`);
+    }
+  } else {
+    console.log(`Clave ${claveabuscar} no encontrada en Adata.`);
+  }
 }
 
 // Llamar a la función principal
