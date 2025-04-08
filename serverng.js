@@ -170,8 +170,27 @@ class EnvioProcessor {
     let fecha = response.fecha;
 
     fecha = await convertToArgentinaTime(fecha);
+    let dataE;
 
-    const dataE = {
+   if(this.dataRedisEnvio.didEmpresa == 311  || this.dataRedisEnvio.didEmpresa == 312 ) {
+
+     dataE = {
+      didempresa: this.dataRedisEnvio.didEmpresa,
+      didenvio: this.dataRedisEnvio.didEnvio,
+      estado: estadonumero,
+      subestado: this.dataEnvioML.substatus,
+      estadoML: this.dataEnvioML.status,
+      fecha: fecha,
+      quien: 0,
+      operacion:"ml"
+    };
+
+   }
+
+   else{
+
+
+     dataE = {
       didempresa: this.dataRedisEnvio.didEmpresa,
       didenvio: this.dataRedisEnvio.didEnvio,
       estado: estadonumero,
@@ -180,6 +199,7 @@ class EnvioProcessor {
       fecha: fecha,
       quien: 0,
     };
+   }
 
     await this.sendToServerEstado(dataE);
 
