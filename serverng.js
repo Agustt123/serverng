@@ -104,7 +104,7 @@ class EnvioProcessor {
 
   async sendToServerEstado(dateE) {
     try {
-      // Establecer conexión con RabbitMQ
+      // Establecer conexión con RabbitMQ si no está establecida
       if (!this.channel) {
         this.connection = await amqp.connect({
           protocol: "amqp",
@@ -118,13 +118,17 @@ class EnvioProcessor {
         await this.channel.assertQueue("srvshipmltosrvstates", {
           durable: true,
         });
-        channel.prefetch(10000);
+        this.channel.prefetch(10000);
       }
 
       const message = typeof dateE === "string" ? dateE : JSON.stringify(dateE);
-      this.channel.sendToQueue("srvshipmltosrvstates", Buffer.from(message), {
-        persistent: true,
-      });
+      await this.channel.sendToQueue(
+        "srvshipmltosrvstates",
+        Buffer.from(message),
+        {
+          persistent: true,
+        }
+      );
 
       setTimeout(() => {
         this.channel.close();
